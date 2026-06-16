@@ -2,11 +2,12 @@
 
 ![Panthera-HT Host UI](images/1.png)
 
-这是 Panthera-HT 六轴机械臂的上位机项目。它主要包含三部分：
+这是 Panthera-HT 六轴机械臂的上位机项目。包含真机控制SDK示例和前后端。项目主要用于：
 
-- 后端：连接机械臂、发送控制命令、把状态发给前端。
-- 前端：在浏览器里显示 3D 机械臂、关节状态和控制面板。
-- SDK 示例脚本：放在 `panthera_python/scripts/`，可以从 Web 页面运行。
+- 连接 Panthera-HT 真机并进行位置、重力补偿、阻抗等控制
+- 在浏览器中实时显示机械臂 3D 状态、关节状态和末端状态
+- 从 Web 页面运行 `panthera_python/scripts/` 下的 SDK 示例脚本
+- 在没有真机时使用 Demo 仿真模式调试前后端界面
 
 第一次上手建议先用 **Demo 模式**，不需要连接真机。
 
@@ -14,7 +15,7 @@
 
 ### 1. 准备环境
 
-推荐使用 Ubuntu，并提前安装 Miniconda 或 Anaconda。
+使用 Ubuntu20/22/24，并提前安装 Miniconda 或 Anaconda。
 
 然后在项目根目录执行：
 
