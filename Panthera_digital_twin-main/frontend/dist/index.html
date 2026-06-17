@@ -397,14 +397,41 @@
             flex-direction: column;
         }
 
-        .script-list-label {
+        .script-list-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
             margin-bottom: 6px;
+        }
+
+        .script-list-label {
+            min-width: 0;
+            flex: 1;
             color: var(--text-tertiary);
             font-size: 11px;
             font-weight: 600;
             overflow: hidden;
             text-overflow: ellipsis;
             white-space: nowrap;
+        }
+
+        .script-refresh-btn {
+            flex-shrink: 0;
+            padding: 3px 8px;
+            color: var(--text-secondary);
+            background: rgba(255, 255, 255, 0.04);
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            border-radius: 6px;
+            font-size: 10px;
+            font-weight: 600;
+            cursor: pointer;
+        }
+
+        .script-refresh-btn:hover {
+            color: var(--text-primary);
+            background: rgba(255, 255, 255, 0.08);
+            border-color: rgba(255, 255, 255, 0.2);
         }
 
         .script-list {
@@ -1584,7 +1611,7 @@
             color: var(--text-secondary);
         }
     </style>
-  <script type="module" crossorigin src="./assets/main-D1XJ_ivt.js"></script>
+  <script type="module" crossorigin src="./assets/main-BeN5JtQE.js"></script>
 </head>
 <body>
     <div id="container">

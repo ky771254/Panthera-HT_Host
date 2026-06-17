@@ -75,7 +75,7 @@ http://localhost:3000
 这等价于：
 
 ```bash
-./backend.sh --live --config ../robot_param/Follower.yaml --port 5000
+./backend.sh --live --config ../../panthera_python/robot_param/Follower.yaml --port 5000
 ```
 
 如果没有连接真机，请使用：
@@ -109,7 +109,7 @@ http://localhost:3000
 - 前端入口：`Panthera_digital_twin-main/frontend/src/main.js`
 - 前端界面：`Panthera_digital_twin-main/frontend/src/ui/`
 - 示例脚本：`panthera_python/scripts/`
-- 默认真机配置：`Panthera_digital_twin-main/robot_param/Follower.yaml`
+- 默认真机配置：`panthera_python/robot_param/Follower.yaml`
 
 Web 页面顶部的 `Scripts` 面板会读取 `panthera_python/scripts/` 目录下的一层 `.py` 文件。
 

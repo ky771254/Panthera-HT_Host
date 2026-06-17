@@ -72,7 +72,10 @@ export class ScriptControlUI {
                         </div>
 
                         <div class="script-form">
-                            <div class="script-list-label" id="script-list-label">Select Script</div>
+                            <div class="script-list-header">
+                                <div class="script-list-label" id="script-list-label">Select Script</div>
+                                <button id="script-refresh-btn" class="script-refresh-btn" type="button" title="Refresh script list">Refresh</button>
+                            </div>
                             <div id="script-list" class="script-list" role="listbox" aria-label="Select Script">
                                 <div class="script-list-empty">Loading scripts...</div>
                             </div>
@@ -106,6 +109,9 @@ export class ScriptControlUI {
 
         const stopBtn = this.panel.querySelector('#script-stop-btn');
         stopBtn?.addEventListener('click', () => this.stopScript());
+
+        const refreshBtn = this.panel.querySelector('#script-refresh-btn');
+        refreshBtn?.addEventListener('click', () => this.loadScripts());
     }
 
     /**
@@ -113,7 +119,7 @@ export class ScriptControlUI {
      */
     async loadScripts() {
         try {
-            const resp = await fetch('/api/scripts');
+            const resp = await fetch('/api/scripts', { cache: 'no-store' });
             const data = await resp.json();
             this.scripts = data.scripts || [];
             this.running = data.running || false;

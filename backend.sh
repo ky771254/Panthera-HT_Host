@@ -4,7 +4,7 @@ set -Eeuo pipefail
 ENV_NAME="Panthera_host"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKEND_DIR="${ROOT_DIR}/Panthera_digital_twin-main/backend"
-DEFAULT_CONFIG="../robot_param/Follower.yaml"
+DEFAULT_CONFIG="../../panthera_python/robot_param/Follower.yaml"
 MODE="live"
 PORT="5000"
 CONFIG="${DEFAULT_CONFIG}"

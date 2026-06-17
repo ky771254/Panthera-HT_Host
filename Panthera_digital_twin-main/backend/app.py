@@ -27,8 +27,8 @@ log.setLevel(logging.ERROR)
 
 # Add Panthera SDK to path
 SDK_PATH = os.path.join(os.path.dirname(__file__), '..', '..', 'panthera_python')
-sys.path.append(SDK_PATH)
-sys.path.append(os.path.join(SDK_PATH, 'scripts'))
+sys.path.insert(0, SDK_PATH)
+sys.path.insert(0, os.path.join(SDK_PATH, 'scripts'))
 
 # Local config path (self-contained in digital_twin folder)
 LOCAL_CONFIG_PATH = os.path.join(os.path.dirname(__file__), '..', 'robot_param', 'xlb.yaml')
@@ -872,7 +872,7 @@ def _discover_scripts():
 
     for filename in sorted(os.listdir(SCRIPTS_DIR)):
         full_path = os.path.normpath(os.path.join(SCRIPTS_DIR, filename))
-        if not os.path.isfile(full_path) or not filename.endswith('.py'):
+        if not os.path.isfile(full_path) or not filename.endswith('.py') or filename.startswith('__'):
             continue
         name = filename[:-3]
         label = name.replace('_', ' ')
@@ -1171,8 +1171,19 @@ def _run_script_in_thread(script_path):
 
     wrapper = _ScriptRobotWrapper()
 
-    # Inject Panthera→wrapper into Panthera_lib
+    # Make sure script imports see the current panthera_python/scripts tree.
+    scripts_path = os.path.abspath(SCRIPTS_DIR)
+    if scripts_path in sys.path:
+        sys.path.remove(scripts_path)
+    sys.path.insert(0, scripts_path)
+
+    # Import a fresh Panthera module so static helpers match the updated scripts.
+    for module_name in list(sys.modules):
+        if module_name == 'Panthera_lib' or module_name.startswith('Panthera_lib.'):
+            del sys.modules[module_name]
     from Panthera_lib.Panthera import Panthera as RealPantheraClass
+
+    # Inject Panthera→wrapper into Panthera_lib
 
     class _ScriptPantheraProxy:
         def __new__(cls, *args, **kwargs):
