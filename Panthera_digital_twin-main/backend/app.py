@@ -59,6 +59,13 @@ script_state = {
 target_positions = [0.0] * 6
 target_velocity = 0.6
 max_torque = [10.0, 10.0, 10.0, 10.0, 10.0, 2.0]
+reset_profile_active = False
+reset_profile_target = [0.0] * 6
+RESET_MAX_VELOCITY = 0.7
+RESET_MIN_VELOCITY = 0.12
+RESET_VELOCITY_GAIN = 1.8
+RESET_VELOCITY_OFFSET = 0.04
+RESET_NEAR_ZERO_THRESHOLD = 0.015
 
 # Current state
 current_positions = [0.0] * 6
@@ -415,7 +422,7 @@ def init_robot(config_path):
 def control_loop():
     """Main control loop - sends commands to robot based on control mode"""
     global current_positions, current_velocities, current_torques, timing_stats
-    global control_mode, impedance_target
+    global control_mode, impedance_target, reset_profile_active
 
     dt = 1.0 / CONTROL_FREQ
 
@@ -437,6 +444,8 @@ def control_loop():
                     mode = control_mode
                     targets = target_positions.copy()
                     vel_target = target_velocity
+                    reset_active = reset_profile_active
+                    reset_target = reset_profile_target.copy()
                     imp_target = impedance_target.copy()
 
                 # Process keyboard input (nudges targets)
@@ -451,7 +460,21 @@ def control_loop():
                         for i in range(min(len(targets), len(JOINT_CONFIG))):
                             jc = JOINT_CONFIG[i]
                             targets[i] = max(jc['min'], min(jc['max'], targets[i]))
-                    vel = [vel_target] * len(targets)
+                    if reset_active:
+                        targets = reset_target[:len(targets)]
+                        errors = [abs(targets[i] - current_positions[i]) for i in range(len(targets))]
+                        max_error = max(errors) if errors else 0.0
+                        vel = [
+                            max(
+                                RESET_MIN_VELOCITY,
+                                min(RESET_MAX_VELOCITY, RESET_VELOCITY_GAIN * error + RESET_VELOCITY_OFFSET)
+                            )
+                            for error in errors
+                        ]
+                        if max_error < RESET_NEAR_ZERO_THRESHOLD:
+                            vel = [RESET_MIN_VELOCITY] * len(targets)
+                    else:
+                        vel = [vel_target] * len(targets)
                     robot.Joint_Pos_Vel(targets, vel, max_torque, iswait=False)
 
                 elif mode == 'gravity_comp':
@@ -722,7 +745,7 @@ def get_status():
 @app.route('/api/move_joint', methods=['POST'])
 def move_joint():
     """Move a single joint"""
-    global target_positions
+    global target_positions, reset_profile_active
 
     data = request.json
     joint_index = data.get('joint')
@@ -735,6 +758,7 @@ def move_joint():
             position = max(jc['min'], min(jc['max'], position))
 
         with target_lock:
+            reset_profile_active = False
             target_positions[joint_index] = position
 
     return jsonify({"success": True})
@@ -743,11 +767,12 @@ def move_joint():
 @app.route('/api/move', methods=['POST'])
 def move_all():
     """Move all joints"""
-    global target_positions, target_velocity
+    global target_positions, target_velocity, reset_profile_active
 
     data = request.json
 
     with target_lock:
+        reset_profile_active = False
         if 'positions' in data:
             positions = data['positions']
             # Clamp to limits
@@ -766,9 +791,10 @@ def move_all():
 @app.route('/api/home', methods=['POST'])
 def go_home():
     """Move to home position"""
-    global target_positions
+    global target_positions, reset_profile_active
 
     with target_lock:
+        reset_profile_active = False
         target_positions[:] = [0.0] * len(target_positions)
 
     return jsonify({"success": True})
@@ -1573,7 +1599,7 @@ def handle_disconnect():
 @socketio.on('move_joint')
 def handle_move_joint(data):
     """Handle joint movement command via WebSocket"""
-    global target_positions
+    global target_positions, reset_profile_active
 
     joint_index = data.get('joint')
     position = data.get('position')
@@ -1584,15 +1610,17 @@ def handle_move_joint(data):
             position = max(jc['min'], min(jc['max'], position))
 
         with target_lock:
+            reset_profile_active = False
             target_positions[joint_index] = position
 
 
 @socketio.on('move_all')
 def handle_move_all(data):
     """Handle all joints movement via WebSocket"""
-    global target_positions, target_velocity
+    global target_positions, target_velocity, reset_profile_active
 
     with target_lock:
+        reset_profile_active = False
         if 'positions' in data:
             positions = data['positions']
             for i, pos in enumerate(positions):
@@ -1608,18 +1636,32 @@ def handle_move_all(data):
 @socketio.on('home')
 def handle_home():
     """Handle home command via WebSocket"""
-    global target_positions
+    global target_positions, reset_profile_active
 
     with target_lock:
+        reset_profile_active = False
         target_positions[:] = [0.0] * len(target_positions)
+
+
+@socketio.on('reset_all')
+def handle_reset_all():
+    """Handle smooth reset command via WebSocket"""
+    global target_positions, target_velocity, reset_profile_active, reset_profile_target
+
+    with target_lock:
+        reset_profile_target[:] = [0.0] * len(target_positions)
+        target_positions[:] = reset_profile_target.copy()
+        target_velocity = RESET_MAX_VELOCITY
+        reset_profile_active = True
 
 
 @socketio.on('stop')
 def handle_stop():
     """Handle stop command via WebSocket"""
-    global target_positions
+    global target_positions, reset_profile_active
 
     with target_lock:
+        reset_profile_active = False
         target_positions[:] = current_positions.copy()
 
 

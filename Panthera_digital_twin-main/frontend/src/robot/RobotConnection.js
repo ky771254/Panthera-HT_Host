@@ -194,6 +194,14 @@ export class RobotConnection {
     }
 
     /**
+     * Send smooth reset command (all joints to zero with backend-managed profile)
+     */
+    resetAll() {
+        if (!this.connected || !this.socket) return
+        this.socket.emit('reset_all')
+    }
+
+    /**
      * Send stop command (hold current position)
      */
     stop() {

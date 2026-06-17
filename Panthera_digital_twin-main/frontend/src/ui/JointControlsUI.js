@@ -21,6 +21,9 @@ export class JointControlsUI {
         this.isUpdatingFromRobot = false;  // Prevent feedback loops
         this.jointIndexMap = new Map();  // joint name -> index mapping
         this.pendingJointValues = new Map(); // joint index -> staged value
+        this.commandVelocity = 0.6;
+        this.velocityInput = null;
+        this.velocityValue = null;
         this.sendPositionsButton = null;
         this.dragPreview = null;
         this.dragPreviewHideTimer = null;
@@ -199,6 +202,8 @@ export class JointControlsUI {
         container.innerHTML = '';
         this.pendingJointValues.clear();
         this.sendPositionsButton = null;
+        this.velocityInput = null;
+        this.velocityValue = null;
         this.destroyDragPreview();
 
         // Build joint index mapping if robot config provided
@@ -232,6 +237,7 @@ export class JointControlsUI {
 
         container.appendChild(this.createSendPositionControl());
         this.updatePositionModeLock();
+        this.updateSendButtonState();
 
         // Save initial joint values
         this.initialJointValues.clear();
@@ -480,6 +486,69 @@ export class JointControlsUI {
         const row = document.createElement('div');
         row.className = 'joint-send-control';
 
+        const velocityControl = document.createElement('div');
+        velocityControl.className = 'joint-velocity-control';
+
+        const velocityHeader = document.createElement('div');
+        velocityHeader.className = 'joint-velocity-header';
+
+        const velocityLabel = document.createElement('span');
+        velocityLabel.className = 'joint-velocity-label';
+        velocityLabel.textContent = 'Velocity';
+
+        const velocityValue = document.createElement('input');
+        velocityValue.type = 'number';
+        velocityValue.className = 'joint-velocity-value';
+        velocityValue.min = '0.1';
+        velocityValue.max = '2.0';
+        velocityValue.step = '0.05';
+        velocityValue.title = 'Type movement velocity';
+
+        const velocitySlider = document.createElement('input');
+        velocitySlider.type = 'range';
+        velocitySlider.className = 'joint-velocity-slider';
+        velocitySlider.min = '0.1';
+        velocitySlider.max = '2.0';
+        velocitySlider.step = '0.05';
+        velocitySlider.value = this.commandVelocity.toString();
+        velocitySlider.title = 'Movement velocity used by Send Position';
+
+        const applyVelocity = (value, updateSlider = true) => {
+            const min = parseFloat(velocitySlider.min);
+            const max = parseFloat(velocitySlider.max);
+            const fallback = Number.isFinite(this.commandVelocity) ? this.commandVelocity : 0.6;
+            const nextValue = Number.isNaN(value) ? fallback : Math.max(min, Math.min(max, value));
+            this.commandVelocity = nextValue;
+            velocityValue.value = this.commandVelocity.toFixed(2);
+            if (updateSlider) velocitySlider.value = this.commandVelocity.toString();
+        };
+
+        velocitySlider.addEventListener('input', () => {
+            applyVelocity(parseFloat(velocitySlider.value), false);
+        });
+
+        velocityValue.addEventListener('change', () => {
+            applyVelocity(parseFloat(velocityValue.value));
+        });
+
+        velocityValue.addEventListener('blur', () => {
+            applyVelocity(parseFloat(velocityValue.value));
+        });
+
+        velocityValue.addEventListener('keydown', (event) => {
+            if (event.key === 'Enter') {
+                applyVelocity(parseFloat(velocityValue.value));
+                velocityValue.blur();
+            }
+        });
+
+        applyVelocity(this.commandVelocity);
+
+        velocityHeader.appendChild(velocityLabel);
+        velocityHeader.appendChild(velocityValue);
+        velocityControl.appendChild(velocityHeader);
+        velocityControl.appendChild(velocitySlider);
+
         const button = document.createElement('button');
         button.type = 'button';
         button.className = 'control-button joint-send-button';
@@ -488,7 +557,10 @@ export class JointControlsUI {
         button.disabled = true;
         button.addEventListener('click', () => this.sendPendingJointPositions());
 
+        row.appendChild(velocityControl);
         row.appendChild(button);
+        this.velocityInput = velocitySlider;
+        this.velocityValue = velocityValue;
         this.sendPositionsButton = button;
         this.updateSendButtonState();
 
@@ -788,7 +860,8 @@ export class JointControlsUI {
         const positions = sliders.map(slider => parseFloat(slider.value));
         if (positions.length === 0 || positions.some(value => Number.isNaN(value))) return;
 
-        this.robotConnection.moveAll(positions);
+        const velocity = Number.isFinite(this.commandVelocity) ? this.commandVelocity : 0.6;
+        this.robotConnection.moveAll(positions, velocity);
         this.pendingJointValues.clear();
         this.updateSendButtonState();
     }
@@ -850,6 +923,7 @@ export class JointControlsUI {
      */
     resetAllJoints(model) {
         if (!model || !model.joints) return;
+        if (this.isPositionModeLocked()) return;
 
         const positions = [];
 
@@ -869,9 +943,11 @@ export class JointControlsUI {
             }
         });
 
-        // Connected mode: send home command to robot
+        // Connected mode: reset follows a continuous S-curve trajectory to zero.
         if (this.isConnectedMode && this.robotConnection && this.robotConnection.isConnected()) {
-            this.robotConnection.home();
+            this.robotConnection.resetAll();
+            this.pendingJointValues.clear();
+            this.updateSendButtonState();
             return;
         }
 
