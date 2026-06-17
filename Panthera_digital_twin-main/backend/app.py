@@ -652,7 +652,7 @@ def start_loops():
 
 # ============== Static Files ==============
 ARM_DESCRIPTION_PATH = os.path.join(os.path.dirname(__file__), '..', 'arm_description')
-PANTHERA_HT_PATH = os.path.join(os.path.dirname(__file__), '..', 'Panthera-HT_description')
+PANTHERA_HT_PATH = os.path.join(os.path.dirname(__file__), '..', '..', 'panthera_python', 'Panthera-HT_description')
 
 
 @app.route('/arm_description/<path:filename>')
@@ -686,6 +686,7 @@ def get_config():
         "control_freq": CONTROL_FREQ,
         "connected": robot is not None or demo_mode,
         "control_mode": control_mode,
+        "end_effector_link": robot_config.get('urdf', {}).get('end_effector_link') if robot_config else None,
         "end_effector_offset": END_EFFECTOR_OFFSET,
         "impedance_kp": impedance_K.tolist(),
     })
@@ -1591,6 +1592,7 @@ def handle_connect():
         "demo_mode": demo_mode,
         "connected": robot is not None or demo_mode,
         "control_mode": control_mode,
+        "end_effector_link": robot_config.get('urdf', {}).get('end_effector_link') if robot_config else None,
         "impedance": {
             "K": impedance_K.tolist(),
             "B": impedance_B.tolist(),

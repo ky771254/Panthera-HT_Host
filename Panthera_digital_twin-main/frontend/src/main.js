@@ -43,7 +43,8 @@ class DigitalTwinApp {
         this.scriptControlUI = null;
         this.robotConfig = null;
         this.isConnectedMode = false;
-        this.endEffectorOffset = 0.07;  // Default offset from Link_6 origin to actual tool tip (meters)
+        this.endEffectorOffset = 0.07;  // Backend FK display offset; marker uses configured end_effector_link.
+        this.endEffectorLinkName = null;
         this.endEffectorMarker = null;  // Red dot showing actual end effector position
         this.arrowOffset = new THREE.Vector3(0.16, 0, -0.16);  // Arrow display offset in EE local frame (x=right, y=up, z=forward)
 
@@ -221,6 +222,7 @@ class DigitalTwinApp {
             this.robotConfig = config;
             this.isConnectedMode = true;
             this.endEffectorOffset = config.end_effector_offset || 0;
+            this.endEffectorLinkName = config.end_effector_link || null;
 
             // Enable connected mode in joint controls
             this.jointControlsUI.setConnectedMode(true);
@@ -253,6 +255,7 @@ class DigitalTwinApp {
             console.log('[DigitalTwin] Robot disconnected');
             this.robotConfig = null;
             this.isConnectedMode = false;
+            this.endEffectorLinkName = null;
 
             // Disable connected mode
             this.jointControlsUI.setConnectedMode(false);
@@ -1043,16 +1046,18 @@ class DigitalTwinApp {
     }
 
     /**
-     * Update end effector marker position
-     */
-    /**
      * Find the last link in the kinematic chain (end effector link)
      */
     _findEndEffectorLink() {
         if (!this.currentModel || !this.currentModel.links) return null;
 
+        if (this.endEffectorLinkName) {
+            const configuredLink = this.currentModel.links.get(this.endEffectorLinkName);
+            if (configuredLink && configuredLink.threeObject) return configuredLink;
+        }
+
         // Try common naming patterns
-        for (const name of ['link6', 'Link_6', 'Link6', 'link_6']) {
+        for (const name of ['tool_link', 'tcp_link', 'ee_link', 'link6', 'Link_6', 'Link6', 'link_6']) {
             const link = this.currentModel.links.get(name);
             if (link && link.threeObject) return link;
         }
@@ -1090,23 +1095,18 @@ class DigitalTwinApp {
         const worldQuaternion = new THREE.Quaternion();
         endEffectorLink.threeObject.getWorldQuaternion(worldQuaternion);
 
-        // Apply tool length offset along link's local Z-axis
-        if (this.endEffectorOffset > 0) {
-            const toolOffset = new THREE.Vector3(0, 0, this.endEffectorOffset);
-            toolOffset.applyQuaternion(worldQuaternion);
-            position.add(toolOffset);
-        }
+        // Marker shows the configured end-effector link position exactly.
+        this.endEffectorMarker.position.copy(position);
 
-        // Apply display offset in EE local frame (affects marker + arrows together)
+        const arrowPosition = position.clone();
+        // Apply display offset only to arrows so the red TCP marker stays on the real end effector.
         if (this.arrowOffset.lengthSq() > 0) {
             const displayOffset = this.arrowOffset.clone().applyQuaternion(worldQuaternion);
-            position.add(displayOffset);
+            arrowPosition.add(displayOffset);
         }
 
-        // Update marker + arrows to the same position (single source of truth)
-        this.endEffectorMarker.position.copy(position);
-        if (this.forceArrow) this.forceArrow.position.copy(position);
-        if (this.torqueArrow) this.torqueArrow.position.copy(position);
+        if (this.forceArrow) this.forceArrow.position.copy(arrowPosition);
+        if (this.torqueArrow) this.torqueArrow.position.copy(arrowPosition);
     }
 }
 
