@@ -117,6 +117,7 @@ MAX_WAYPOINTS = 6
 waypoints = []
 trajectory_running = False
 trajectory_progress = 0.0
+TRAJECTORY_START_BLEND_DURATION = 1.0
 
 
 def rotation_matrix_to_euler(R):
@@ -230,6 +231,40 @@ def precise_sleep(duration):
         pass
 
 
+def _current_arm_positions():
+    if robot is not None and not demo_mode:
+        try:
+            robot.send_get_motor_state_cmd()
+            pos = robot.get_current_pos()
+            return (pos.tolist() if hasattr(pos, 'tolist') else list(pos))[:ARM_JOINT_COUNT]
+        except Exception:
+            pass
+    return current_positions.copy()
+
+
+def _prepare_trajectory_from_current_pose():
+    global reset_profile_active, reset_gripper_active
+
+    with target_lock:
+        reset_profile_active = False
+        reset_gripper_active = False
+
+    current_start = _clamp_arm_positions(_current_arm_positions())
+    waypoint_list = [wp['positions'] for wp in waypoints]
+    durations = [wp['duration'] for wp in waypoints[:-1]]
+
+    if waypoint_list:
+        first_distance = max(
+            abs(current_start[i] - waypoint_list[0][i])
+            for i in range(min(len(current_start), len(waypoint_list[0])))
+        )
+        if first_distance > 0.01:
+            waypoint_list = [current_start] + waypoint_list
+            durations = [TRAJECTORY_START_BLEND_DURATION] + durations
+
+    return waypoint_list, durations
+
+
 def execute_trajectory_thread(waypoint_list, durations, control_rate=100):
     """Execute trajectory in a separate thread"""
     global trajectory_running, trajectory_progress, target_positions, control_mode
@@ -275,8 +310,7 @@ def execute_trajectory_thread(waypoint_list, durations, control_rate=100):
             return True
         return False
 
-    # Switch to trajectory mode - control_loop will skip, letting us have exclusive control
-    prev_mode = control_mode
+    # Switch to trajectory mode - control_loop will skip, letting this thread have exclusive control.
     control_mode = 'trajectory'
 
     trajectory_running = True
@@ -336,7 +370,10 @@ def execute_trajectory_thread(waypoint_list, durations, control_rate=100):
 
     finally:
         trajectory_running = False
-        control_mode = prev_mode
+        control_mode = 'position'
+        with target_lock:
+            if waypoint_list:
+                target_positions[:] = _clamp_arm_positions(waypoint_list[-1])
 
     return True
 
@@ -1721,9 +1758,7 @@ def run_trajectory():
     data = request.json
     control_rate = data.get('control_rate', 100)
 
-    # Build waypoint list and durations
-    waypoint_list = [wp['positions'] for wp in waypoints]
-    durations = [wp['duration'] for wp in waypoints[:-1]]  # n-1 durations for n waypoints
+    waypoint_list, durations = _prepare_trajectory_from_current_pose()
 
     # Start trajectory in separate thread
     traj_thread = threading.Thread(
@@ -2024,8 +2059,7 @@ def handle_run_trajectory(data):
 
     control_rate = data.get('control_rate', 100)
 
-    waypoint_list = [wp['positions'] for wp in waypoints]
-    durations = [wp['duration'] for wp in waypoints[:-1]]
+    waypoint_list, durations = _prepare_trajectory_from_current_pose()
 
     traj_thread = threading.Thread(
         target=execute_trajectory_thread,
