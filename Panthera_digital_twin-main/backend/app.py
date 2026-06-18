@@ -41,6 +41,9 @@ socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 CONTROL_FREQ = 200  # Hz - control loop frequency
 BROADCAST_FREQ = 30  # Hz - WebSocket broadcast frequency
 END_EFFECTOR_OFFSET = 0.07  # meters - offset from Link_6 origin to actual tool tip
+ARM_JOINT_COUNT = 6
+GRIPPER_JOINT_NAME = "gripper"
+GRIPPER_DEFAULT_TARGET = 0.0
 # =============================================
 
 # Robot instance
@@ -61,6 +64,8 @@ target_velocity = 0.6
 max_torque = [10.0, 10.0, 10.0, 10.0, 10.0, 2.0]
 reset_profile_active = False
 reset_profile_target = [0.0] * 6
+reset_gripper_active = False
+reset_gripper_target = 0.0
 RESET_MAX_VELOCITY = 0.7
 RESET_MIN_VELOCITY = 0.12
 RESET_VELOCITY_GAIN = 1.8
@@ -358,7 +363,18 @@ def load_config(config_path):
             "name": name,
             "index": i,
             "min": lower_limits[i],
-            "max": upper_limits[i]
+            "max": upper_limits[i],
+            "kind": "arm"
+        })
+
+    gripper_limits = robot_config.get('robot', {}).get('gripper_limits')
+    if gripper_limits:
+        JOINT_CONFIG.append({
+            "name": GRIPPER_JOINT_NAME,
+            "index": len(joint_names),
+            "min": float(gripper_limits.get('lower', 0.0)),
+            "max": float(gripper_limits.get('upper', 1.8)),
+            "kind": "gripper"
         })
 
     print(f"Config loaded: {robot_config['robot']['name']}")
@@ -366,6 +382,107 @@ def load_config(config_path):
     print(f"Joints: {len(JOINT_CONFIG)}")
 
     return robot_config
+
+
+def _arm_joint_config():
+    return [jc for jc in JOINT_CONFIG if jc.get("kind") != "gripper"]
+
+
+def _gripper_config():
+    for jc in JOINT_CONFIG:
+        if jc.get("kind") == "gripper" or jc.get("name") == GRIPPER_JOINT_NAME:
+            return jc
+    return None
+
+
+def _gripper_limits_list():
+    cfg = _gripper_config()
+    if not cfg:
+        return None
+    return [cfg["min"], cfg["max"]]
+
+
+def _clamp_gripper_position(position):
+    cfg = _gripper_config()
+    position = float(position)
+    if cfg:
+        position = max(cfg["min"], min(cfg["max"], position))
+    return position
+
+
+def _set_gripper_target(position, velocity=0.3):
+    global _gripper_target
+    position = _clamp_gripper_position(position)
+    _gripper_target = position
+    if robot is not None and not demo_mode:
+        try:
+            robot.gripper_control(position, velocity, 0.5)
+        except Exception:
+            pass
+    return position
+
+
+def _read_gripper_position():
+    global _gripper_target
+    if robot is not None and not demo_mode:
+        try:
+            state = robot.get_current_state_gripper()
+            _gripper_target = _clamp_gripper_position(state.position)
+        except Exception:
+            pass
+    return _gripper_target
+
+
+def _is_gripper_index(joint_index):
+    cfg = _gripper_config()
+    return cfg is not None and joint_index == cfg["index"]
+
+
+def _reset_velocity_from_error(error):
+    return max(
+        RESET_MIN_VELOCITY,
+        min(RESET_MAX_VELOCITY, RESET_VELOCITY_GAIN * error + RESET_VELOCITY_OFFSET)
+    )
+
+
+def _clamp_arm_positions(positions):
+    arm_config = _arm_joint_config()
+    next_positions = list(positions[:len(target_positions)])
+    for i, pos in enumerate(next_positions):
+        if i < len(arm_config):
+            jc = arm_config[i]
+            next_positions[i] = max(jc["min"], min(jc["max"], pos))
+    return next_positions
+
+
+def _start_smooth_position_reset():
+    global target_positions, target_velocity, reset_profile_active, reset_profile_target
+    global reset_gripper_active, reset_gripper_target
+
+    reset_profile_target[:] = [0.0] * len(target_positions)
+    target_positions[:] = reset_profile_target.copy()
+    reset_gripper_target = 0.0
+    reset_gripper_active = True
+    target_velocity = RESET_MAX_VELOCITY
+    reset_profile_active = True
+
+
+def _set_control_mode(mode):
+    global control_mode, impedance_target, reset_profile_active, reset_gripper_active
+
+    previous_mode = control_mode
+    control_mode = mode
+
+    if mode == 'position':
+        if previous_mode in ['gravity_comp', 'impedance']:
+            _start_smooth_position_reset()
+        return
+
+    reset_profile_active = False
+    reset_gripper_active = False
+
+    if mode == 'impedance':
+        impedance_target = np.array(current_positions)
 
 
 def init_robot(config_path):
@@ -405,11 +522,7 @@ def init_robot(config_path):
         global target_positions, current_positions, _gripper_target
         target_positions = pos_list
         current_positions = pos_list
-        try:
-            gs = robot.get_current_state_gripper()
-            _gripper_target = gs.position
-        except Exception:
-            _gripper_target = 0.0
+        _set_gripper_target(GRIPPER_DEFAULT_TARGET)
 
         return True
     except Exception as e:
@@ -422,7 +535,7 @@ def init_robot(config_path):
 def control_loop():
     """Main control loop - sends commands to robot based on control mode"""
     global current_positions, current_velocities, current_torques, timing_stats
-    global control_mode, impedance_target, reset_profile_active
+    global control_mode, impedance_target, reset_profile_active, reset_gripper_active
 
     dt = 1.0 / CONTROL_FREQ
 
@@ -446,6 +559,8 @@ def control_loop():
                     vel_target = target_velocity
                     reset_active = reset_profile_active
                     reset_target = reset_profile_target.copy()
+                    gripper_reset_active = reset_gripper_active
+                    gripper_reset_target = reset_gripper_target
                     imp_target = impedance_target.copy()
 
                 # Process keyboard input (nudges targets)
@@ -456,26 +571,29 @@ def control_loop():
                 if mode == 'position':
                     # Position control mode - direct joint control
                     # Safety clamp
-                    if JOINT_CONFIG:
-                        for i in range(min(len(targets), len(JOINT_CONFIG))):
-                            jc = JOINT_CONFIG[i]
+                    arm_config = _arm_joint_config()
+                    if arm_config:
+                        for i in range(min(len(targets), len(arm_config))):
+                            jc = arm_config[i]
                             targets[i] = max(jc['min'], min(jc['max'], targets[i]))
                     if reset_active:
                         targets = reset_target[:len(targets)]
                         errors = [abs(targets[i] - current_positions[i]) for i in range(len(targets))]
                         max_error = max(errors) if errors else 0.0
-                        vel = [
-                            max(
-                                RESET_MIN_VELOCITY,
-                                min(RESET_MAX_VELOCITY, RESET_VELOCITY_GAIN * error + RESET_VELOCITY_OFFSET)
-                            )
-                            for error in errors
-                        ]
+                        vel = [_reset_velocity_from_error(error) for error in errors]
                         if max_error < RESET_NEAR_ZERO_THRESHOLD:
                             vel = [RESET_MIN_VELOCITY] * len(targets)
                     else:
                         vel = [vel_target] * len(targets)
                     robot.Joint_Pos_Vel(targets, vel, max_torque, iswait=False)
+
+                    if gripper_reset_active:
+                        current_gripper_position = _read_gripper_position()
+                        gripper_error = abs(gripper_reset_target - current_gripper_position)
+                        gripper_velocity = _reset_velocity_from_error(gripper_error)
+                        if gripper_error < RESET_NEAR_ZERO_THRESHOLD:
+                            gripper_velocity = RESET_MIN_VELOCITY
+                        _set_gripper_target(gripper_reset_target, velocity=gripper_velocity)
 
                 elif mode == 'gravity_comp':
                     # Gravity compensation mode - robot floats freely
@@ -609,12 +727,14 @@ def state_broadcast_loop():
                 with target_lock:
                     mode = control_mode
                     imp_target = impedance_target.tolist()
+                    gripper_position = _read_gripper_position()
 
                 socketio.emit('robot_state', {
                     'positions': current_positions,
                     'velocities': current_velocities,
                     'torques': current_torques,
                     'target_positions': target_positions,
+                    'gripper_position': gripper_position,
                     'control_mode': mode,
                     'impedance_target': imp_target,
                     'forward_kinematics': current_fk,
@@ -688,6 +808,7 @@ def get_config():
         "control_mode": control_mode,
         "end_effector_link": robot_config.get('urdf', {}).get('end_effector_link') if robot_config else None,
         "end_effector_offset": END_EFFECTOR_OFFSET,
+        "gripper_limits": _gripper_limits_list(),
         "impedance_kp": impedance_K.tolist(),
     })
 
@@ -739,28 +860,38 @@ def get_status():
         "velocities": current_velocities,
         "torques": current_torques,
         "target_positions": target_positions,
-        "target_velocity": target_velocity
+        "target_velocity": target_velocity,
+        "gripper_position": _read_gripper_position()
     })
 
 
 @app.route('/api/move_joint', methods=['POST'])
 def move_joint():
     """Move a single joint"""
-    global target_positions, reset_profile_active
+    global target_positions, reset_profile_active, reset_gripper_active
 
     data = request.json
     joint_index = data.get('joint')
     position = data.get('position')
 
     if joint_index is not None and position is not None:
+        joint_index = int(joint_index)
+        if _is_gripper_index(joint_index):
+            reset_gripper_active = False
+            _set_gripper_target(position)
+            return jsonify({"success": True})
+
         # Clamp to joint limits
-        if JOINT_CONFIG and joint_index < len(JOINT_CONFIG):
-            jc = JOINT_CONFIG[joint_index]
+        arm_config = _arm_joint_config()
+        if arm_config and joint_index < len(arm_config):
+            jc = arm_config[joint_index]
             position = max(jc['min'], min(jc['max'], position))
 
-        with target_lock:
-            reset_profile_active = False
-            target_positions[joint_index] = position
+        if joint_index < len(target_positions):
+            with target_lock:
+                reset_profile_active = False
+                reset_gripper_active = False
+                target_positions[joint_index] = position
 
     return jsonify({"success": True})
 
@@ -768,20 +899,23 @@ def move_joint():
 @app.route('/api/move', methods=['POST'])
 def move_all():
     """Move all joints"""
-    global target_positions, target_velocity, reset_profile_active
+    global target_positions, target_velocity, reset_profile_active, reset_gripper_active
 
     data = request.json
+    gripper_velocity = data.get('velocity', 0.3)
 
     with target_lock:
         reset_profile_active = False
+        reset_gripper_active = False
         if 'positions' in data:
-            positions = data['positions']
-            # Clamp to limits
-            for i, pos in enumerate(positions):
-                if JOINT_CONFIG and i < len(JOINT_CONFIG):
-                    jc = JOINT_CONFIG[i]
-                    positions[i] = max(jc['min'], min(jc['max'], pos))
-            target_positions[:] = positions
+            positions = list(data['positions'])
+            target_positions[:] = _clamp_arm_positions(positions)
+            gripper_cfg = _gripper_config()
+            if gripper_cfg and len(positions) > gripper_cfg["index"]:
+                _set_gripper_target(positions[gripper_cfg["index"]], velocity=gripper_velocity)
+
+        if 'gripper' in data:
+            _set_gripper_target(data['gripper'], velocity=gripper_velocity)
 
         if 'velocity' in data:
             target_velocity = data['velocity']
@@ -792,11 +926,13 @@ def move_all():
 @app.route('/api/home', methods=['POST'])
 def go_home():
     """Move to home position"""
-    global target_positions, reset_profile_active
+    global target_positions, reset_profile_active, reset_gripper_active
 
     with target_lock:
         reset_profile_active = False
+        reset_gripper_active = False
         target_positions[:] = [0.0] * len(target_positions)
+        _set_gripper_target(0.0)
 
     return jsonify({"success": True})
 
@@ -804,9 +940,11 @@ def go_home():
 @app.route('/api/stop', methods=['POST'])
 def stop():
     """Stop at current position"""
-    global target_positions
+    global target_positions, reset_profile_active, reset_gripper_active
 
     with target_lock:
+        reset_profile_active = False
+        reset_gripper_active = False
         target_positions[:] = current_positions.copy()
 
     return jsonify({"success": True})
@@ -1067,9 +1205,10 @@ def _run_script_in_thread(script_path):
     real_robot = robot  # NEVER patch this — control/broadcast loops use it
 
     # ── joint limits for position clamping ──────────────────────────
-    if JOINT_CONFIG:
-        jl_lower = np.array([JOINT_CONFIG[i]['min'] for i in range(len(JOINT_CONFIG))])
-        jl_upper = np.array([JOINT_CONFIG[i]['max'] for i in range(len(JOINT_CONFIG))])
+    arm_config = _arm_joint_config()
+    if arm_config:
+        jl_lower = np.array([jc['min'] for jc in arm_config])
+        jl_upper = np.array([jc['max'] for jc in arm_config])
     else:
         jl_lower = np.array([-3.14]*6)
         jl_upper = np.array([3.14]*6)
@@ -1344,8 +1483,6 @@ def set_velocity():
 @app.route('/api/set_mode', methods=['POST'])
 def set_mode():
     """Set control mode: 'position', 'gravity_comp', 'impedance'"""
-    global control_mode, impedance_target
-
     data = request.json
     mode = data.get('mode', 'position')
 
@@ -1353,11 +1490,7 @@ def set_mode():
         return jsonify({"success": False, "error": "Invalid mode"}), 400
 
     with target_lock:
-        control_mode = mode
-
-        # When switching to impedance mode, set current position as target
-        if mode == 'impedance':
-            impedance_target = np.array(current_positions)
+        _set_control_mode(mode)
 
     print(f"Control mode changed to: {mode}")
     return jsonify({"success": True, "mode": mode})
@@ -1593,6 +1726,7 @@ def handle_connect():
         "connected": robot is not None or demo_mode,
         "control_mode": control_mode,
         "end_effector_link": robot_config.get('urdf', {}).get('end_effector_link') if robot_config else None,
+        "gripper_limits": _gripper_limits_list(),
         "impedance": {
             "K": impedance_K.tolist(),
             "B": impedance_B.tolist(),
@@ -1612,35 +1746,48 @@ def handle_disconnect():
 @socketio.on('move_joint')
 def handle_move_joint(data):
     """Handle joint movement command via WebSocket"""
-    global target_positions, reset_profile_active
+    global target_positions, reset_profile_active, reset_gripper_active
 
     joint_index = data.get('joint')
     position = data.get('position')
 
     if joint_index is not None and position is not None:
-        if JOINT_CONFIG and joint_index < len(JOINT_CONFIG):
-            jc = JOINT_CONFIG[joint_index]
+        joint_index = int(joint_index)
+        if _is_gripper_index(joint_index):
+            reset_gripper_active = False
+            _set_gripper_target(position)
+            return
+
+        arm_config = _arm_joint_config()
+        if arm_config and joint_index < len(arm_config):
+            jc = arm_config[joint_index]
             position = max(jc['min'], min(jc['max'], position))
 
-        with target_lock:
-            reset_profile_active = False
-            target_positions[joint_index] = position
+        if joint_index < len(target_positions):
+            with target_lock:
+                reset_profile_active = False
+                reset_gripper_active = False
+                target_positions[joint_index] = position
 
 
 @socketio.on('move_all')
 def handle_move_all(data):
     """Handle all joints movement via WebSocket"""
-    global target_positions, target_velocity, reset_profile_active
+    global target_positions, target_velocity, reset_profile_active, reset_gripper_active
 
     with target_lock:
+        gripper_velocity = data.get('velocity', 0.3)
         reset_profile_active = False
+        reset_gripper_active = False
         if 'positions' in data:
-            positions = data['positions']
-            for i, pos in enumerate(positions):
-                if JOINT_CONFIG and i < len(JOINT_CONFIG):
-                    jc = JOINT_CONFIG[i]
-                    positions[i] = max(jc['min'], min(jc['max'], pos))
-            target_positions[:] = positions
+            positions = list(data['positions'])
+            target_positions[:] = _clamp_arm_positions(positions)
+            gripper_cfg = _gripper_config()
+            if gripper_cfg and len(positions) > gripper_cfg["index"]:
+                _set_gripper_target(positions[gripper_cfg["index"]], velocity=gripper_velocity)
+
+        if 'gripper' in data:
+            _set_gripper_target(data['gripper'], velocity=gripper_velocity)
 
         if 'velocity' in data:
             target_velocity = data['velocity']
@@ -1649,39 +1796,37 @@ def handle_move_all(data):
 @socketio.on('home')
 def handle_home():
     """Handle home command via WebSocket"""
-    global target_positions, reset_profile_active
+    global target_positions, reset_profile_active, reset_gripper_active
 
     with target_lock:
         reset_profile_active = False
+        reset_gripper_active = False
         target_positions[:] = [0.0] * len(target_positions)
+        _set_gripper_target(0.0)
 
 
 @socketio.on('reset_all')
 def handle_reset_all():
     """Handle smooth reset command via WebSocket"""
-    global target_positions, target_velocity, reset_profile_active, reset_profile_target
-
     with target_lock:
-        reset_profile_target[:] = [0.0] * len(target_positions)
-        target_positions[:] = reset_profile_target.copy()
-        target_velocity = RESET_MAX_VELOCITY
-        reset_profile_active = True
+        _start_smooth_position_reset()
 
 
 @socketio.on('stop')
 def handle_stop():
     """Handle stop command via WebSocket"""
-    global target_positions, reset_profile_active
+    global target_positions, reset_profile_active, reset_gripper_active
 
     with target_lock:
         reset_profile_active = False
+        reset_gripper_active = False
         target_positions[:] = current_positions.copy()
 
 
 @socketio.on('set_zero')
 def handle_set_zero():
     """Handle set zero command via WebSocket - reset encoder positions to zero"""
-    global robot, current_positions, target_positions
+    global robot, current_positions, target_positions, reset_profile_active, reset_gripper_active
 
     if robot is None:
         emit('set_zero_result', {'success': False, 'error': 'Robot not connected'})
@@ -1694,6 +1839,8 @@ def handle_set_zero():
 
         # Reset our tracked positions to zero
         with target_lock:
+            reset_profile_active = False
+            reset_gripper_active = False
             current_positions[:] = [0.0] * len(current_positions)
             target_positions[:] = [0.0] * len(target_positions)
 
@@ -1716,16 +1863,11 @@ def handle_set_zero():
 @socketio.on('set_mode')
 def handle_set_mode(data):
     """Handle control mode change via WebSocket"""
-    global control_mode, impedance_target
-
     mode = data.get('mode', 'position')
 
     if mode in ['position', 'gravity_comp', 'impedance']:
         with target_lock:
-            control_mode = mode
-            # When switching to impedance mode, set current position as target
-            if mode == 'impedance':
-                impedance_target = np.array(current_positions)
+            _set_control_mode(mode)
 
         print(f"Control mode changed to: {mode}")
 
@@ -1951,9 +2093,10 @@ def _process_keyboard():
             if keys.get('l'): t[4] -= KEY_STEP
             if keys.get('u'): t[5] += KEY_STEP
             if keys.get('o'): t[5] -= KEY_STEP
-            if JOINT_CONFIG:
-                for i in range(len(t)):
-                    t[i] = max(JOINT_CONFIG[i]['min'], min(JOINT_CONFIG[i]['max'], t[i]))
+            arm_config = _arm_joint_config()
+            if arm_config:
+                for i in range(min(len(t), len(arm_config))):
+                    t[i] = max(arm_config[i]['min'], min(arm_config[i]['max'], t[i]))
 
     elif control_mode == 'impedance':
         t = impedance_target
@@ -1969,16 +2112,17 @@ def _process_keyboard():
         if keys.get('l'): t[4] -= KEY_STEP
         if keys.get('u'): t[5] += KEY_STEP
         if keys.get('o'): t[5] -= KEY_STEP
-        if JOINT_CONFIG:
-            for i in range(len(t)):
-                t[i] = max(JOINT_CONFIG[i]['min'], min(JOINT_CONFIG[i]['max'], t[i]))
+        arm_config = _arm_joint_config()
+        if arm_config:
+            for i in range(min(len(t), len(arm_config))):
+                t[i] = max(arm_config[i]['min'], min(arm_config[i]['max'], t[i]))
 
     # Gripper keys (work in any mode)
     if keys.get('z') or keys.get('x'):
         if keys.get('z'): _gripper_target += GRIPPER_STEP
         if keys.get('x'): _gripper_target -= GRIPPER_STEP
         # Clamp
-        gl = JOINT_CONFIG[-1] if JOINT_CONFIG and len(JOINT_CONFIG) > 6 else None
+        gl = _gripper_config()
         if gl:
             _gripper_target = max(gl['min'], min(gl['max'], _gripper_target))
         if robot is not None and not demo_mode:

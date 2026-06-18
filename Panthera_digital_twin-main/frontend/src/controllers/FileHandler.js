@@ -553,12 +553,13 @@ export class FileHandler {
             // Clear existing file map
             this.fileMap.clear();
 
-            // Find the URDF file - prefer Panthera-HT_description_follower.urdf
+            // Find the URDF file - prefer the visual model with finger geometry.
             let urdfPath = null;
             const urdfFiles = Object.keys(fileList).filter(p => p.endsWith('.urdf'));
 
-            // Prefer Panthera-HT follower URDF, then leader, then fallback to any URDF
-            urdfPath = urdfFiles.find(p => p.includes('Panthera-HT_description_follower')) ||
+            // Prefer Panthera-HT with-finger URDF, then follower, then leader, then fallback to any URDF
+            urdfPath = urdfFiles.find(p => p.includes('Panthera-HT_description_with_finger')) ||
+                       urdfFiles.find(p => p.includes('Panthera-HT_description_follower')) ||
                        urdfFiles.find(p => p.includes('Panthera-HT_description_leader')) ||
                        urdfFiles.find(p => p.includes('xrb')) ||
                        urdfFiles[0];
@@ -622,4 +623,3 @@ export class FileHandler {
         }
     }
 }
-

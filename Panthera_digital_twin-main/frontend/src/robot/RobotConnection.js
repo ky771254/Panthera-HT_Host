@@ -173,13 +173,17 @@ export class RobotConnection {
      * Send all joints position command
      * @param {number[]} positions - Array of 6 joint positions in radians
      * @param {number} [velocity] - Movement velocity (optional)
+     * @param {number|null} [gripper] - Gripper target position (optional)
      */
-    moveAll(positions, velocity = null) {
+    moveAll(positions, velocity = null, gripper = null) {
         if (!this.connected || !this.socket) return
 
         const data = { positions }
         if (velocity !== null) {
             data.velocity = velocity
+        }
+        if (gripper !== null) {
+            data.gripper = gripper
         }
 
         this.socket.emit('move_all', data)

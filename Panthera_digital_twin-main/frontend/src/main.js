@@ -17,7 +17,6 @@ import { RobotConnection, robotConnection } from './robot/RobotConnection.js';
 import { ConnectionUI } from './ui/ConnectionUI.js';
 import { KeyboardControlUI } from './ui/KeyboardControlUI.js';
 import { ScriptControlUI } from './ui/ScriptControlUI.js';
-import { ModelLoaderFactory } from './loaders/ModelLoaderFactory.js';
 
 // Expose d3 globally for PanelManager
 window.d3 = d3;
@@ -45,8 +44,9 @@ class DigitalTwinApp {
         this.isConnectedMode = false;
         this.endEffectorOffset = 0.07;  // Backend FK display offset; marker uses configured end_effector_link.
         this.endEffectorLinkName = null;
+        this.endEffectorMarkerOffset = new THREE.Vector3(0.16555, 0, 0);
         this.endEffectorMarker = null;  // Red dot showing actual end effector position
-        this.arrowOffset = new THREE.Vector3(0.16, 0, -0.16);  // Arrow display offset in EE local frame (x=right, y=up, z=forward)
+        this.arrowOffset = new THREE.Vector3(0, 0, 0);
 
         // Force/torque 3D arrows (custom cylinder+cone for thick lines)
         this.forceArrow = null;
@@ -278,14 +278,6 @@ class DigitalTwinApp {
                 // Update joint positions from robot
                 this.jointControlsUI.updateFromRobotState(state);
 
-                // Update gripper joint on 3D model
-                if (state.gripper_position !== undefined && this.robotConfig?.gripper_limits) {
-                    const [gMin, gMax] = this.robotConfig.gripper_limits;
-                    const gRange = gMax - gMin || 1;
-                    // Map motor rad → URDF prismatic meters (0~0.04)
-                    const fingerPos = ((state.gripper_position - gMin) / gRange) * 0.04;
-                    ModelLoaderFactory.setJointAngle(this.currentModel, 'L_finger_joint', fingerPos);
-                }
             }
 
             // Update FK display with backend-computed EE pose (includes tool offset)
@@ -1056,7 +1048,7 @@ class DigitalTwinApp {
             if (configuredLink && configuredLink.threeObject) return configuredLink;
         }
 
-        // Try common naming patterns
+        // Try fixed TCP/tool frames first. Avoid finger links because they move when the gripper opens.
         for (const name of ['tool_link', 'tcp_link', 'ee_link', 'link6', 'Link_6', 'Link6', 'link_6']) {
             const link = this.currentModel.links.get(name);
             if (link && link.threeObject) return link;
@@ -1068,7 +1060,9 @@ class DigitalTwinApp {
             this.currentModel.joints.forEach(joint => {
                 if (joint.type !== 'fixed' && joint.child) {
                     const childLink = this.currentModel.links.get(joint.child);
-                    if (childLink && childLink.threeObject) lastLink = childLink;
+                    if (childLink && childLink.threeObject && !['L_finger', 'R_finger'].includes(childLink.name)) {
+                        lastLink = childLink;
+                    }
                 }
             });
         }
@@ -1095,11 +1089,15 @@ class DigitalTwinApp {
         const worldQuaternion = new THREE.Quaternion();
         endEffectorLink.threeObject.getWorldQuaternion(worldQuaternion);
 
-        // Marker shows the configured end-effector link position exactly.
-        this.endEffectorMarker.position.copy(position);
+        const markerPosition = position.clone();
+        if (endEffectorLink.name === 'link6' && this.endEffectorMarkerOffset.lengthSq() > 0) {
+            markerPosition.add(this.endEffectorMarkerOffset.clone().applyQuaternion(worldQuaternion));
+        }
 
-        const arrowPosition = position.clone();
-        // Apply display offset only to arrows so the red TCP marker stays on the real end effector.
+        // Marker shows the fixed tool center, not the sliding finger links.
+        this.endEffectorMarker.position.copy(markerPosition);
+
+        const arrowPosition = markerPosition.clone();
         if (this.arrowOffset.lengthSq() > 0) {
             const displayOffset = this.arrowOffset.clone().applyQuaternion(worldQuaternion);
             arrowPosition.add(displayOffset);

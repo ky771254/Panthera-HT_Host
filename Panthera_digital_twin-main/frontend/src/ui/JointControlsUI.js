@@ -25,6 +25,9 @@ export class JointControlsUI {
         this.velocityInput = null;
         this.velocityValue = null;
         this.sendPositionsButton = null;
+        this.robotJointConfigs = [];
+        this.gripperConfig = null;
+        this.gripperUiLimits = { min: 0, max: 1.8 };
         this.dragPreview = null;
         this.dragPreviewHideTimer = null;
         this.previewRenderer = null;
@@ -59,6 +62,81 @@ export class JointControlsUI {
 
         this.updatePositionModeLock();
         this.updateSendButtonState();
+    }
+
+    isGripperName(name) {
+        return name === 'gripper';
+    }
+
+    isGripperControlName(name) {
+        return this.isGripperName(name) || this.isFingerJointName(name);
+    }
+
+    isFingerJointName(name) {
+        return name === 'L_finger' || name === 'R_finger';
+    }
+
+    createGripperJoint() {
+        const lower = this.gripperUiLimits.min;
+        const upper = this.gripperUiLimits.max;
+        return {
+            name: 'gripper',
+            type: 'prismatic',
+            limits: { lower, upper },
+            currentValue: lower,
+            isVirtualGripper: true
+        };
+    }
+
+    clampValue(value, lower, upper) {
+        return Math.max(lower, Math.min(upper, value));
+    }
+
+    applyOfflineZeroState(model) {
+        if (!model) return;
+
+        document.querySelectorAll('.joint-slider').forEach(slider => {
+            const jointName = slider.getAttribute('data-joint');
+            const joint = model.joints.get(jointName);
+            const lower = parseFloat(slider.min);
+            const upper = parseFloat(slider.max);
+            const zeroValue = this.clampValue(0.0, lower, upper);
+
+            slider.value = zeroValue;
+            this.initialJointValues.set(jointName, zeroValue);
+            this.applyJointToModel(model, jointName, zeroValue, true);
+
+            if (joint) {
+                joint.currentValue = zeroValue;
+            }
+
+            const control = slider.closest('.joint-control');
+            if (control && control._updateDisplay) control._updateDisplay();
+        });
+    }
+
+    gripperToFingerPosition(value) {
+        const min = this.gripperUiLimits.min;
+        const max = this.gripperUiLimits.max;
+        const range = max - min || 1;
+        const normalized = Math.max(0, Math.min(1, (value - min) / range));
+        return normalized * 0.04;
+    }
+
+    applyJointToModel(model, jointName, value, ignoreLimits = false) {
+        if (!model) return;
+
+        if (this.isGripperName(jointName)) {
+            const fingerPos = this.gripperToFingerPosition(value);
+            for (const name of ['L_finger', 'R_finger']) {
+                if (model.getJoint?.(name)) {
+                    ModelLoaderFactory.setJointAngle(model, name, fingerPos, true);
+                }
+            }
+            return;
+        }
+
+        ModelLoaderFactory.setJointAngle(model, jointName, value, ignoreLimits);
     }
 
     /**
@@ -108,35 +186,37 @@ export class JointControlsUI {
         try {
             const positions = state.positions;
 
-            // Update each slider
-            document.querySelectorAll('.joint-slider').forEach((slider, index) => {
-                if (index < positions.length) {
-                    const robotPosition = positions[index];
-                    const pendingPosition = this.pendingJointValues.get(index);
-                    const displayPosition = pendingPosition !== undefined ? pendingPosition : robotPosition;
-                    const control = slider.closest('.joint-control');
+            document.querySelectorAll('.joint-slider').forEach((slider) => {
+                const jointName = slider.getAttribute('data-joint');
+                const jointIndex = Number(slider.getAttribute('data-joint-index'));
+                let robotPosition;
 
-                    // Check if value input is currently focused (user is typing)
-                    const valueInput = control?.querySelector('.joint-value-input');
-                    const isInputFocused = valueInput && document.activeElement === valueInput;
+                if (this.isGripperName(jointName)) {
+                    if (state.gripper_position === undefined) return;
+                    robotPosition = state.gripper_position;
+                } else {
+                    if (jointIndex >= positions.length) return;
+                    robotPosition = positions[jointIndex];
+                }
 
-                    // Keep staged slider values visible, but keep the 3D model on real robot state.
-                    slider.value = displayPosition;
+                const pendingPosition = this.pendingJointValues.get(jointIndex);
+                const displayPosition = pendingPosition !== undefined ? pendingPosition : robotPosition;
+                const control = slider.closest('.joint-control');
 
-                    // Only update value display if user is NOT typing
-                    if (control && control._updateDisplay && !isInputFocused) {
-                        control._updateDisplay();
-                    }
+                // Check if value input is currently focused (user is typing)
+                const valueInput = control?.querySelector('.joint-value-input');
+                const isInputFocused = valueInput && document.activeElement === valueInput;
 
-                    // Update 3D model
-                    const jointName = slider.getAttribute('data-joint');
-                    if (jointName && this.sceneManager.currentModel) {
-                        ModelLoaderFactory.setJointAngle(
-                            this.sceneManager.currentModel,
-                            jointName,
-                            robotPosition
-                        );
-                    }
+                // Keep staged slider values visible, but keep the 3D model on real robot state.
+                slider.value = displayPosition;
+
+                // Only update value display if user is NOT typing
+                if (control && control._updateDisplay && !isInputFocused) {
+                    control._updateDisplay();
+                }
+
+                if (jointName && this.sceneManager.currentModel) {
+                    this.applyJointToModel(this.sceneManager.currentModel, jointName, robotPosition);
                 }
             });
 
@@ -208,9 +288,13 @@ export class JointControlsUI {
 
         // Build joint index mapping if robot config provided
         this.jointIndexMap.clear();
+        this.robotJointConfigs = [];
+        this.gripperConfig = null;
         if (robotConfig && robotConfig.joints) {
-            robotConfig.joints.forEach((jc, index) => {
-                this.jointIndexMap.set(jc.name, index);
+            this.robotJointConfigs = robotConfig.joints.filter(jc => jc.kind !== 'gripper');
+            this.gripperConfig = robotConfig.joints.find(jc => jc.kind === 'gripper' || jc.name === 'gripper') || null;
+            robotConfig.joints.forEach((jc) => {
+                this.jointIndexMap.set(jc.name, jc.index);
             });
         }
 
@@ -222,12 +306,43 @@ export class JointControlsUI {
             return;
         }
 
-        let controllableJoints = 0;
-        model.joints.forEach((joint) => {
-            if (joint.type !== 'fixed') controllableJoints++;
-        });
+        let controlsToCreate = [];
+        if (this.robotJointConfigs.length > 0) {
+            controlsToCreate = this.robotJointConfigs
+                .map((jc) => {
+                    const joint = model.joints.get(jc.name);
+                    if (!joint || joint.type === 'fixed') return null;
+                    if (joint.limits) {
+                        joint.limits.lower = jc.min;
+                        joint.limits.upper = jc.max;
+                    } else {
+                        joint.limits = { lower: jc.min, upper: jc.max };
+                    }
+                    return { joint, index: jc.index };
+                })
+                .filter(Boolean);
 
-        if (controllableJoints === 0) {
+            if (this.gripperConfig) {
+                controlsToCreate.push({
+                    joint: this.createGripperJoint(),
+                    index: this.gripperConfig.index
+                });
+            }
+        } else {
+            let fallbackIndex = 0;
+            model.joints.forEach((joint, name) => {
+                if (joint.type === 'fixed' || this.isGripperControlName(name)) return;
+                controlsToCreate.push({ joint, index: fallbackIndex++ });
+            });
+            if (model.joints.has('L_finger') || model.joints.has('R_finger')) {
+                controlsToCreate.push({
+                    joint: this.createGripperJoint(),
+                    index: fallbackIndex
+                });
+            }
+        }
+
+        if (controlsToCreate.length === 0) {
             const emptyState = document.createElement('div');
             emptyState.className = 'empty-state';
             emptyState.textContent = window.i18n ? window.i18n.t('noControllableJoints') : 'No controllable joints';
@@ -241,31 +356,35 @@ export class JointControlsUI {
 
         // Save initial joint values
         this.initialJointValues.clear();
-        let jointIndex = 0;
-        model.joints.forEach((joint, name) => {
-            if (joint.type !== 'fixed') {
-                const limits = joint.limits || {};
-                const lower = limits.lower !== undefined ? limits.lower : -Math.PI;
-                const upper = limits.upper !== undefined ? limits.upper : Math.PI;
-                const initialValue = joint.currentValue !== undefined ? joint.currentValue : (lower + upper) / 2;
-                this.initialJointValues.set(name, initialValue);
-
-                // Map joint name to index if not already mapped
-                if (!this.jointIndexMap.has(name)) {
-                    this.jointIndexMap.set(name, jointIndex);
+        controlsToCreate.forEach(({ joint, index }) => {
+            const limits = joint.limits || {};
+            const lower = limits.lower !== undefined ? limits.lower : -Math.PI;
+            const upper = limits.upper !== undefined ? limits.upper : Math.PI;
+            const initialValue = robotConfig ?
+                (joint.currentValue !== undefined ? joint.currentValue : lower) :
+                this.clampValue(0.0, lower, upper);
+            this.initialJointValues.set(joint.name, initialValue);
+            if (!robotConfig) {
+                this.applyJointToModel(model, joint.name, initialValue, true);
+                if (!this.isGripperName(joint.name)) {
+                    joint.currentValue = initialValue;
                 }
-                jointIndex++;
+            }
+
+            if (!this.jointIndexMap.has(joint.name)) {
+                this.jointIndexMap.set(joint.name, index);
             }
         });
 
         // Create controls for each joint
-        jointIndex = 0;
-        model.joints.forEach((joint, name) => {
-            if (joint.type === 'fixed') return;
-            const control = this.createJointControl(joint, model, jointIndex);
+        controlsToCreate.forEach(({ joint, index }) => {
+            const control = this.createJointControl(joint, model, index);
             container.appendChild(control);
-            jointIndex++;
         });
+
+        if (!robotConfig) {
+            this.applyOfflineZeroState(model);
+        }
 
         this.updatePositionModeLock();
     }
@@ -276,7 +395,9 @@ export class JointControlsUI {
     createJointControl(joint, model, jointIndex) {
         const div = document.createElement('div');
         div.className = 'joint-control';
+        if (this.isGripperName(joint.name)) div.classList.add('gripper-control');
         div.setAttribute('data-joint-index', jointIndex);
+        const isGripper = this.isGripperName(joint.name);
 
         // Header row: name + value
         const header = document.createElement('div');
@@ -310,7 +431,10 @@ export class JointControlsUI {
         slider.min = lower;
         slider.max = upper;
 
-        let initialValue = joint.currentValue !== undefined ? joint.currentValue : (lower + upper) / 2;
+        let initialValue = this.initialJointValues.get(joint.name);
+        if (initialValue === undefined) {
+            initialValue = joint.currentValue !== undefined ? joint.currentValue : (lower + upper) / 2;
+        }
         slider.value = initialValue;
         slider.step = (upper - lower) / 1000;
 
@@ -336,12 +460,12 @@ export class JointControlsUI {
 
         const valueUnit = document.createElement('span');
         valueUnit.className = 'joint-value-unit';
-        valueUnit.textContent = this.angleUnit === 'deg' ? '°' : 'rad';
+        valueUnit.textContent = isGripper ? '' : (this.angleUnit === 'deg' ? '°' : 'rad');
 
         const updateLabels = () => {
             const currentMin = parseFloat(slider.min);
             const currentMax = parseFloat(slider.max);
-            if (this.angleUnit === 'deg') {
+            if (!isGripper && this.angleUnit === 'deg') {
                 minLabel.value = (currentMin * 180 / Math.PI).toFixed(1);
                 maxLabel.value = (currentMax * 180 / Math.PI).toFixed(1);
             } else {
@@ -352,7 +476,7 @@ export class JointControlsUI {
 
         const updateValueInput = () => {
             const value = parseFloat(slider.value);
-            valueInput.value = this.angleUnit === 'deg' ?
+            valueInput.value = !isGripper && this.angleUnit === 'deg' ?
                 (value * 180 / Math.PI).toFixed(1) :
                 value.toFixed(2);
         };
@@ -365,7 +489,7 @@ export class JointControlsUI {
             let inputValue = parseFloat(minLabel.value);
             if (isNaN(inputValue)) { updateLabels(); return; }
 
-            let valueInRad = this.angleUnit === 'deg' ? inputValue * Math.PI / 180 : inputValue;
+            let valueInRad = !isGripper && this.angleUnit === 'deg' ? inputValue * Math.PI / 180 : inputValue;
             const currentMax = parseFloat(slider.max);
             if (valueInRad >= currentMax) { updateLabels(); return; }
 
@@ -373,7 +497,7 @@ export class JointControlsUI {
             slider.step = (slider.max - slider.min) / 1000;
 
             if (joint.limits) joint.limits.lower = valueInRad;
-            this.updateEditorXML(joint.name, { lower: valueInRad });
+            if (!isGripper) this.updateEditorXML(joint.name, { lower: valueInRad });
 
             const currentValue = parseFloat(slider.value);
             if (currentValue < valueInRad) {
@@ -388,7 +512,7 @@ export class JointControlsUI {
             let inputValue = parseFloat(maxLabel.value);
             if (isNaN(inputValue)) { updateLabels(); return; }
 
-            let valueInRad = this.angleUnit === 'deg' ? inputValue * Math.PI / 180 : inputValue;
+            let valueInRad = !isGripper && this.angleUnit === 'deg' ? inputValue * Math.PI / 180 : inputValue;
             const currentMin = parseFloat(slider.min);
             if (valueInRad <= currentMin) { updateLabels(); return; }
 
@@ -396,7 +520,7 @@ export class JointControlsUI {
             slider.step = (slider.max - slider.min) / 1000;
 
             if (joint.limits) joint.limits.upper = valueInRad;
-            this.updateEditorXML(joint.name, { upper: valueInRad });
+            if (!isGripper) this.updateEditorXML(joint.name, { upper: valueInRad });
 
             const currentValue = parseFloat(slider.value);
             if (currentValue > valueInRad) {
@@ -456,7 +580,7 @@ export class JointControlsUI {
             let inputValue = parseFloat(valueInput.value);
             if (isNaN(inputValue)) { updateValueInput(); return; }
 
-            let valueInRad = this.angleUnit === 'deg' ? inputValue * Math.PI / 180 : inputValue;
+            let valueInRad = !isGripper && this.angleUnit === 'deg' ? inputValue * Math.PI / 180 : inputValue;
             const currentMin = parseFloat(slider.min);
             const currentMax = parseFloat(slider.max);
             valueInRad = Math.max(currentMin, Math.min(currentMax, valueInRad));
@@ -470,7 +594,7 @@ export class JointControlsUI {
         div._updateDisplay = () => {
             updateValueInput();
             updateLabels();
-            valueUnit.textContent = this.angleUnit === 'deg' ? '°' : 'rad';
+            valueUnit.textContent = isGripper ? '' : (this.angleUnit === 'deg' ? '°' : 'rad');
         };
 
         div.appendChild(header);
@@ -722,7 +846,7 @@ export class JointControlsUI {
             if (value === undefined) value = parseFloat(slider.value);
 
             if (name && !Number.isNaN(value)) {
-                ModelLoaderFactory.setJointAngle(model, name, value, true);
+                this.applyJointToModel(model, name, value, true);
             }
         });
     }
@@ -857,11 +981,24 @@ export class JointControlsUI {
                 return ai - bi;
             });
 
-        const positions = sliders.map(slider => parseFloat(slider.value));
-        if (positions.length === 0 || positions.some(value => Number.isNaN(value))) return;
+        const armPositions = [];
+        let gripperPosition = null;
+        for (const slider of sliders) {
+            const jointName = slider.getAttribute('data-joint');
+            const value = parseFloat(slider.value);
+            if (Number.isNaN(value)) return;
+
+            if (this.isGripperName(jointName)) {
+                gripperPosition = value;
+            } else {
+                armPositions.push(value);
+            }
+        }
+
+        if (armPositions.length === 0) return;
 
         const velocity = Number.isFinite(this.commandVelocity) ? this.commandVelocity : 0.6;
-        this.robotConnection.moveAll(positions, velocity);
+        this.robotConnection.moveAll(armPositions, velocity, gripperPosition);
         this.pendingJointValues.clear();
         this.updateSendButtonState();
     }
@@ -884,13 +1021,13 @@ export class JointControlsUI {
         }
 
         // Offline mode: update visualization directly.
-        ModelLoaderFactory.setJointAngle(model, jointName, value);
+        this.applyJointToModel(model, jointName, value);
 
         const joint = model.joints.get(jointName);
         if (joint) joint.currentValue = value;
 
         // Apply constraints
-        if (this.sceneManager.constraintManager) {
+        if (!this.isGripperName(jointName) && this.sceneManager.constraintManager) {
             this.sceneManager.constraintManager.applyConstraints(model, joint);
         }
 
@@ -925,24 +1062,6 @@ export class JointControlsUI {
         if (!model || !model.joints) return;
         if (this.isPositionModeLocked()) return;
 
-        const positions = [];
-
-        // Collect initial positions
-        model.joints.forEach((joint, name) => {
-            if (joint.type !== 'fixed') {
-                let initialValue = this.initialJointValues.get(name);
-
-                if (initialValue === undefined) {
-                    const limits = joint.limits || {};
-                    const lower = limits.lower !== undefined ? limits.lower : -Math.PI;
-                    const upper = limits.upper !== undefined ? limits.upper : Math.PI;
-                    initialValue = joint.currentValue !== undefined ? joint.currentValue : (lower + upper) / 2;
-                }
-
-                positions.push(initialValue);
-            }
-        });
-
         // Connected mode: reset follows a continuous S-curve trajectory to zero.
         if (this.isConnectedMode && this.robotConnection && this.robotConnection.isConnected()) {
             this.robotConnection.resetAll();
@@ -951,22 +1070,22 @@ export class JointControlsUI {
             return;
         }
 
-        // Offline mode: update visualization directly
-        let posIndex = 0;
-        model.joints.forEach((joint, name) => {
-            if (joint.type !== 'fixed') {
-                const initialValue = positions[posIndex++];
-
-                ModelLoaderFactory.setJointAngle(model, name, initialValue, true);
-                joint.currentValue = initialValue;
-
-                const slider = document.querySelector(`input[data-joint="${name}"]`);
-                if (slider) {
-                    slider.value = initialValue;
-                    const control = slider.closest('.joint-control');
-                    if (control && control._updateDisplay) control._updateDisplay();
-                }
+        // Offline mode: update visualization directly from the visible controls.
+        document.querySelectorAll('.joint-slider').forEach(slider => {
+            const name = slider.getAttribute('data-joint');
+            let initialValue = this.initialJointValues.get(name);
+            if (initialValue === undefined) {
+                initialValue = parseFloat(slider.min) || 0;
             }
+
+            slider.value = initialValue;
+            this.applyJointToModel(model, name, initialValue, true);
+
+            const joint = model.joints.get(name);
+            if (joint) joint.currentValue = initialValue;
+
+            const control = slider.closest('.joint-control');
+            if (control && control._updateDisplay) control._updateDisplay();
         });
 
         this.sceneManager.render();
@@ -984,6 +1103,17 @@ export class JointControlsUI {
 
         document.querySelectorAll('.joint-slider').forEach(slider => {
             const jointName = slider.getAttribute('data-joint');
+            if (this.isGripperName(jointName)) {
+                const min = this.gripperUiLimits.min;
+                const max = this.gripperUiLimits.max;
+                slider.min = min;
+                slider.max = max;
+                slider.step = (max - min) / 1000;
+                const control = slider.closest('.joint-control');
+                if (control && control._updateDisplay) control._updateDisplay();
+                return;
+            }
+
             const joint = model.joints.get(jointName);
 
             if (joint && joint.type !== 'fixed') {
