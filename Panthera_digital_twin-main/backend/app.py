@@ -563,6 +563,14 @@ def _start_smooth_position_reset(with_handoff=False):
     reset_profile_active = True
 
 
+def _hold_current_position_target():
+    global target_positions
+
+    hold_positions = _clamp_arm_positions(_current_arm_positions())
+    target_positions[:] = hold_positions
+    _cancel_reset_profile()
+
+
 def _set_control_mode(mode):
     global control_mode, impedance_target, reset_profile_active, reset_gripper_active
 
@@ -571,7 +579,7 @@ def _set_control_mode(mode):
 
     if mode == 'position':
         if previous_mode in ['gravity_comp', 'gravity_friction', 'impedance']:
-            _start_smooth_position_reset(with_handoff=True)
+            _hold_current_position_target()
         return
 
     _cancel_reset_profile()

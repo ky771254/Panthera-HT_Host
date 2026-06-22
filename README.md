@@ -1,5 +1,7 @@
 # Panthera-HT Host
 
+[![中文](https://img.shields.io/badge/lang-简体中文-red.svg)](README.md#中文)[![en](https://img.shields.io/badge/lang-English-blue.svg)](README_en.md#english)
+
 ![Panthera-HT Host UI](images/1.png)
 
 这是 Panthera-HT 机械臂的上位机项目。包含真机控制SDK示例和前后端。项目主要用于：
