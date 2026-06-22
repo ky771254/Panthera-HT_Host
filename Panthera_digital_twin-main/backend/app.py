@@ -462,6 +462,16 @@ def _set_gripper_target(position, velocity=0.3):
     return position
 
 
+def _set_default_gripper_mit_hold():
+    global _gripper_target
+    _gripper_target = 0.0
+    if robot is not None and not demo_mode:
+        try:
+            robot.gripper_control_MIT(0.0, 0.0, 0.0, 0.9, 0.06)
+        except Exception:
+            pass
+
+
 def _release_gripper():
     """Release gripper torque so it can be moved freely by hand."""
     if robot is not None and not demo_mode:
@@ -607,7 +617,7 @@ def init_robot(config_path):
         global target_positions, current_positions, _gripper_target
         target_positions = pos_list
         current_positions = pos_list
-        _set_gripper_target(GRIPPER_DEFAULT_TARGET)
+        _set_default_gripper_mit_hold()
 
         return True
     except Exception as e:
